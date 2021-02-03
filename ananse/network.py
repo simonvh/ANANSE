@@ -26,8 +26,8 @@ from loguru import logger
 from pybedtools import BedTool
 from genomepy import Genome
 
-from ananse import mytmpdir
-import ananse
+from ananse import __file__
+from ananse.utils import mytmpdir
 
 warnings.filterwarnings("ignore")
 
@@ -68,7 +68,7 @@ class Network(object):
         # self.motifs2factors = self.pfmfile.replace(".pfm", ".motif2factors.txt")
         # self.factortable = self.pfmfile.replace(".pfm", ".factortable.txt")
 
-        package_dir = os.path.dirname(ananse.__file__)
+        package_dir = os.path.dirname(__file__)
 
         # Gene information file
         if self.genome == "hg38":
@@ -681,7 +681,7 @@ class Network(object):
         expression = expression.reset_index()
         expression=expression.rename(columns={"index":"gene", "tpm":"target_expression"})
         
-        package_dir = os.path.dirname(ananse.__file__)
+        package_dir = os.path.dirname(__file__)
         tffile = os.path.join(package_dir, "db", "tfs.txt")
         tfs = pd.read_csv(tffile, header=None)[0].tolist()
 

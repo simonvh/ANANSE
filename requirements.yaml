@@ -22,7 +22,7 @@ dependencies:
   - diskcache
   - xxhash
   - configparser
-  - six
+  - six  # do we still need this?
   - future
   - gimmemotifs >=0.14.4
   - pandas=1.1.5  # tmp dependency due to gimmemotifs bug
@@ -35,3 +35,4 @@ dependencies:
   - adjusttext
   - loguru
   - genomepy >=0.8.3
+  - versioneer=0.18  # currently used

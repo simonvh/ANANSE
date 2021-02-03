@@ -23,19 +23,20 @@ import dask.dataframe as dd
 from scipy.stats import rankdata
 
 from pybedtools import BedTool
-from genomepy import Genome
+from genomepy import utils
 from gimmemotifs.scanner import Scanner
 from gimmemotifs.motif import read_motifs
 from gimmemotifs.utils import as_fasta, pfmfile_location
 
-from ananse import mytmpdir
-import ananse
+from ananse import __file__
+from ananse.utils import mytmpdir, set_width
 
 warnings.filterwarnings("ignore")
 
 
 def clear_tfs(motifs2factors, tffile, include_notfs=False, rm_curated=True):
-    """filter unreal TFs from motif database
+    """
+    filter unreal TFs from motif database
 
     Arguments:
         motifs2factors {[type]} -- [motifs2factors]
@@ -54,30 +55,32 @@ def clear_tfs(motifs2factors, tffile, include_notfs=False, rm_curated=True):
         tfs = pd.read_csv(tffile, header = None)[0].tolist()
         ft = ft.loc[ft.Factor.isin (tfs)]
     # replace T to TBXT
-    ft = ft.replace("T" , "TBXT")
-    ft = ft.replace("t" , "tbxt")
+    ft = ft.replace("T", "TBXT")
+    ft = ft.replace("t", "tbxt")
 
-    ft.rename(columns = {"Factor":"factor"}, inplace = True)
+    ft.rename(columns={"Factor": "factor"}, inplace=True)
     return ft
+
 
 class Binding(object):
     def __init__(self, ncore=1, genome="hg38", gene_bed=None, pfmfile=None, include_notfs=False, rm_curated=True, etype="hg38H3K27ac", tffile=None):
-
         self.ncore = ncore
         self.genome = genome
 
         # dream_model.txt is the logistic regression model.
-        package_dir = os.path.dirname(ananse.__file__)
-        self.etype = etype
+        package_dir = os.path.dirname(__file__)
+        # self.etype = etype
 
-        if self.genome == "hg38" and self.etype == "hg38H3K27ac":
-            self.model = os.path.join(package_dir, "db", "dream_model_h3k27ac.txt")
-        elif self.etype == "p300" or self.etype == "ATAC":
-            self.model = os.path.join(package_dir, "db", "dream_model_p300.txt")
-        else:
-            raise TypeError("""The input enhancer data type should hg38H3K27ac, p300 or ATAC. 
-            It is not possible set -e to hg38H3K27ac if the genome is not hg38. 
-            Please provide a enhancer type with -e argument. By default is hg38H3K27ac.""")
+        # TODO: instead of etype, expose model selection an input variable, with these 2 as mentioned included.
+        self.model = os.path.join(package_dir, "db", "dream_model_p300.pickle")
+        # if self.genome == "hg38" and self.etype == "hg38H3K27ac":
+        #     self.model = os.path.join(package_dir, "db", "dream_model_h3k27ac.pickle")
+        # elif self.etype == "p300" or self.etype == "ATAC":
+        #     self.model = os.path.join(package_dir, "db", "dream_model_p300.pickle")
+        # else:
+        #     raise TypeError("""The input enhancer data type should hg38H3K27ac, p300 or ATAC.
+        #     It is not possible set -e to hg38H3K27ac if the genome is not hg38.
+        #     Please provide a enhancer type with -e argument. By default is hg38H3K27ac.""")
 
         # filter tfs?
         self.include_notfs = include_notfs
@@ -93,118 +96,78 @@ class Binding(object):
         # Motif information file
         self.pfmfile = pfmfile_location(pfmfile)
         self.motifs2factors = self.pfmfile.replace(".pfm", ".motif2factors.txt")
+
         self.filtermotifs2factors = clear_tfs(self.motifs2factors, self.tffile, self.include_notfs, self.rm_curated)
 
-    def set_peak_size(self, peak_bed, seqlen=200):
-        """set all input peaks to 200bp
-
-        Arguments:
-            peak_bed {[bed]} -- [input peak bed file]
-
-        Keyword Arguments:
-            seqlen {int} -- [peak length] (default: {200})
-
-        Returns:
-            [type] -- [200bp peak file]
+    @staticmethod
+    def get_peak_scores(enhancer_regions_bed, outfile):
         """
-        gsizedic = Genome(self.genome).sizes
-
-        peaks = BedTool(peak_bed)
-        fl2 = NamedTemporaryFile(mode="w", dir=mytmpdir(), delete=False)
-
-        for peak in peaks:
-
-            if peak.length < seqlen or peak.length > seqlen:
-                # get the summit and the flanking low and high sequences
-                summit = (peak.start + peak.end) // 2
-                start, end = summit - seqlen // 2, summit + seqlen // 2
-            else:
-                start, end = peak.start, peak.end
-            # remove seq which langer than chromosome length or smaller than 0
-            if start > 0 and end < int(gsizedic[peak.chrom]):
-                fl2.write(
-                    str(peak.chrom)
-                    + "\t"
-                    + str(start)
-                    + "\t"
-                    + str(end)
-                    + "\t"
-                    + str(peak.fields[-1])
-                    + "\n"
-                )
-        # return npeaks
-        return fl2.name
-
-    def get_peakRPKM(self, fin_rpkm):
+        accepts a BED4 file with a scoring metric in the 4th column (originally RPKM).
+        """
         # When we built model, the peak intensity was ranked and scaled.
-        peaks = pd.read_table(fin_rpkm, names=["chrom", "start", "end", "peakRPKM"])
+        peaks = pd.read_table(enhancer_regions_bed, names=["chrom", "start", "end", "peak_score"])
         peaks["peak"] = (
-            peaks["chrom"]
+            peaks["chrom"].astype(str)
             + ":"
             + peaks["start"].astype(str)
             + "-"
             + peaks["end"].astype(str)
         )
-        add = peaks["peakRPKM"][peaks["peakRPKM"] > 0].min()
-        peaks["log10_peakRPKM"] = np.log10(peaks["peakRPKM"] + add)
-        peaks["peakRPKMScale"] = minmax_scale(peaks["log10_peakRPKM"])
-        peaks["peakRPKMRank"] = minmax_scale(rankdata(peaks["log10_peakRPKM"]))
+        # TODO: IMPORTANT: log10 transform may not be OK for every scoring factor. Expose as variable?
+        peaks["log10_peak_score"] = np.log10(peaks["peak_score"] + 1)
+        peaks["Scaled_peak_score"] = minmax_scale(peaks["log10_peak_score"])
+        peaks["Ranked_peak_score"] = minmax_scale(rankdata(peaks["log10_peak_score"]))
 
-        peakrpkmfile = NamedTemporaryFile(mode="w", dir=mytmpdir(), delete=False)
-        cols = ["peak", "peakRPKM", "log10_peakRPKM", "peakRPKMScale", "peakRPKMRank"]
-        peaks[cols].to_csv(peakrpkmfile, sep="\t", index=False)
+        # TODO: original column names ------v
+        # add = peaks["peakRPKM"][peaks["peakRPKM"] > 0].min()
+        # peaks["log10_peakRPKM"] = np.log10(peaks["peakRPKM"] + add)
+        # peaks["peakRPKMScale"] = minmax_scale(peaks["log10_peakRPKM"])
+        # peaks["peakRPKMRank"] = minmax_scale(rankdata(peaks["log10_peakRPKM"]))
 
-        return peakrpkmfile.name
+        cols = ["peak", "peak_score", "log10_peak_score", "Scaled_peak_score", "Ranked_peak_score"]
+        peaks[cols].to_csv(outfile, sep="\t", index=False)
 
-    def get_PWMScore(self, fin_regions_fa):
-        """ Scan motif in every peak.
-
-        Arguments:
-            fin_regions_fa {[type]} -- [input fasta file]
-
-        Returns:
-            [type] -- [pfmscorefile]
+    def get_motif_scores(self, enhancer_regions_bed, outfile):
         """
-        pfmscorefile = NamedTemporaryFile(mode="w", dir=mytmpdir(), delete=False)
-        seqs = [s.split(" ")[0] for s in as_fasta(fin_regions_fa, genome=self.genome).ids]
+        Scan for TF binding motifs in potential enhancer regions.
+        """
+        pfmscorefile = outfile  # NamedTemporaryFile(mode="w", dir=mytmpdir(), delete=False)
+        seqs = [s.split(" ")[0] for s in as_fasta(enhancer_regions_bed, genome=self.genome).ids]
 
         s = Scanner(ncpus=self.ncore)
         s.set_motifs(self.pfmfile)
-        s.set_threshold(threshold=0.0)
         s.set_genome(self.genome)
+        s.set_threshold(threshold=0.0)
+
+        # generate GC background index
+        _ = s.best_score([], zscore=True, gc=True)
 
         with open(self.pfmfile) as f:
             motifs = read_motifs(f)
 
+        # Run 10k peaks per scan.
         chunksize = 10000
-        # Run 10k peaks one time.
 
+        open(outfile, 'w').close()
         with tqdm(total=len(seqs)) as pbar:
             for chunk in range(0, len(seqs), chunksize):
-                chunk_seqs = seqs[chunk : chunk + chunksize]
-                # print(chunk, "-", chunk + chunksize, "enhancers")
                 pfm_score = []
-                it = s.best_score(chunk_seqs, zscore=True, gc=True)
-                # We are using GC-normalization for motif scan because many sequence is GC-enriched.
-                # GimmeMotif develop branch already include GC-normalization option now.
-                for seq, scores in zip(chunk_seqs, it):
+                chunk_seqs = seqs[chunk:chunk+chunksize]
+                # We are using GC-normalization for motif scanning as many enhancer binding regions are GC-enriched.
+                chunk_scores = s.best_score(chunk_seqs, zscore=True, gc=True)
+                for seq, scores in zip(chunk_seqs, chunk_scores):
                     for motif, score in zip(motifs, scores):
                         pfm_score.append([motif.id, seq, score])
                     pbar.update(1)
                 pfm_score = pd.DataFrame(pfm_score, columns=["motif", "enhancer", "zscore"])
                 pfm_score = pfm_score.set_index("motif")
-
-                # print("\tCombine")
                 pfm_score["zscoreRank"] = minmax_scale(rankdata(pfm_score["zscore"]))
+
                 # When we built model, rank and minmax normalization was used.
                 cols = ["enhancer", "zscore", "zscoreRank"]
-                write_header = False
-                if chunk == 0:
-                    write_header = True
-                pfm_score[cols].to_csv(pfmscorefile, sep="\t", header=write_header)
-                # pbar.update(chunk + chunksize)
-
-        return pfmscorefile.name
+                write_header = True if chunk == 0 else False
+                # TODO: default mode was 'w'. does that not overwrite every loop iteration? Set to 'a' (append)
+                pfm_score[cols].to_csv(pfmscorefile, sep="\t", header=write_header, mode='a')
 
     def get_binding_score(self, pfm, peak):
         """Infer TF binding score from motif z-score and peak intensity.
@@ -223,43 +186,38 @@ class Binding(object):
 
         ft = self.filtermotifs2factors
 
-        if self.etype == "hg38H3K27ac":
-            r = pfm.merge(peak, left_on="enhancer", right_on="peak")[
-                ["motif", "enhancer", "zscore", "log10_peakRPKM"]
-            ]
-            r = r.merge(ft, left_on="motif", right_on="Motif")
-            r = r.groupby(["factor", "enhancer"])[["zscore", "log10_peakRPKM"]].mean()
-            r = r.dropna().reset_index()
-            table = r.compute(num_workers=self.ncore)
-            table["binding"] = clf.predict_proba(table[["zscore", "log10_peakRPKM"]])[:, 1]
+        r = pfm.merge(peak, left_on="enhancer", right_on="peak")[
+            ["motif", "enhancer", "zscore", "log10_peakRPKM"]
+        ]
+        r = r.merge(ft, left_on="motif", right_on="Motif")
+        r = r.groupby(["factor", "enhancer"])[["zscore", "log10_peakRPKM"]].mean()
+        r = r.dropna().reset_index()
 
-        elif self.etype == "p300" or self.etype == "ATAC":
-            r = pfm.merge(peak, left_on="enhancer", right_on="peak")[
-                ["motif", "enhancer", "zscore", "log10_peakRPKM"]
-            ]
-            r = r.merge(ft, left_on="motif", right_on="Motif")
-            r = r.groupby(["factor", "enhancer"])[["zscore", "log10_peakRPKM"]].mean()
-            r = r.dropna().reset_index()
-
-            table = r.compute(num_workers=self.ncore)
-            table["binding"] = clf.predict_proba(table[["zscore", "log10_peakRPKM"]])[:, 1]
-        else:
-            raise TypeError("The input enhancer data type should hg38H3K27ac, p300 or ATAC. Please provide a enhancer type with -e argument. By default is hg38H3K27ac.")
+        table = r.compute(num_workers=self.ncore)
+        table["binding"] = clf.predict_proba(table[["zscore", "log10_peakRPKM"]])[:, 1]
 
         return table
 
     def run_binding(self, peak_bed, outfile):
+        intermediate_dir = os.path.join(os.path.dirname(outfile), "intermediate")
+        utils.mkdir_p(intermediate_dir)
 
         logger.info("Peak initialization")
-
-        filter_bed = self.set_peak_size(peak_bed)
+        filter_bed = os.path.join(intermediate_dir, "filter.bed")
+        if not os.path.exists(filter_bed) or os.stat(filter_bed).st_size == 0:
+            set_width(self.genome, peak_bed, filter_bed)
 
         logger.info("Motif scan")
-        pfm_weight = self.get_PWMScore(filter_bed)
-        pfm = dd.read_csv(pfm_weight, sep="\t")
+        pfm_weight = os.path.join(intermediate_dir, "pfm_weights.tsv")
+        if not os.path.exists(pfm_weight) or os.stat(pfm_weight).st_size == 0:
+            self.get_motif_scores(filter_bed, pfm_weight)
 
         logger.info("Predicting TF binding sites")
-        peak_weight = self.get_peakRPKM(filter_bed)
+        peak_weight = os.path.join(intermediate_dir, "peak_weights.tsv")
+        if not os.path.exists(peak_weight) or os.stat(peak_weight).st_size == 0:
+            self.get_peak_scores(filter_bed, peak_weight)
+
+        pfm = dd.read_csv(pfm_weight, sep="\t")
         peak = dd.read_csv(peak_weight, sep="\t", blocksize=200e6)
         table = self.get_binding_score(pfm, peak)
 
