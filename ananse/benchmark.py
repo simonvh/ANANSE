@@ -158,6 +158,7 @@ def read_network(fname, name=None):
     pandas.DataFrame
         DataFrame containing edges.
     """
+    logger.info(f"reading {fname}")
     network = fname
     if fname.endswith("feather"):
         df = pd.read_feather(network)
@@ -326,3 +327,46 @@ def read_networks(network_dict):
         df = df.join(tmp, how="outer")
 
     return df
+
+def benchmark_networks(fnames, references=None):
+    """Benchmark networks.
+
+    Parameters
+    ----------
+    fnames : list
+        List of file names with networks.
+    references : list, optional
+        List of references to use. Can be a combination of "dorothea", 
+        "perturbation" and/pior filenames.
+    """
+    if references is None:
+        references = ["dorothea", "perturbation"]
+
+    # Check file names before we read any data
+    _validate_files(fnames)
+
+    # Read all the references
+    ref_info = []
+    if "dorothea" in references:
+        dorothea = read_reference("dorothea")
+        ref_info.append([dorothea, "dorothea", "is_evidence_curated"])
+    if "perturbation" in references:
+        perturb = read_reference("perturbation")
+        ref_info.append([perturb, "TF perturbations", "perturb_interaction"])
+    
+    for fname in references:
+        if fname in ["dorothea", "perturbation"]:
+            continue
+        ref = read_reference(fname)
+        ref_info.append([ref, os.path.split(fname)[-1], "interaction"])
+    
+    for ref_network, name, ref_col in ref_info:
+        print(f"baseline\t{name}\t{ref_network[ref_col].mean():0.5f}")
+
+    for fname in fnames:
+        network = read_network(fname, name="test_edge")
+        for ref_network, name, ref_col in ref_info:
+            test = ref_network.join(network).fillna(-100)
+            pr_auc = average_precision_score(test[ref_col], test["test_edge"])
+            roc_auc = roc_auc_score(test[ref_col], test["test_edge"])
+            print(f"{fname}\t{name}\t{pr_auc:0.5f}")
